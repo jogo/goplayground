@@ -1,3 +1,24 @@
+/*
+Testing out boltdb for the following use case:
+
+* Load several million key/value pairs in as quickly as possible
+* Data forms a graph, that will be searched using A*
+* Load once, search many times
+* Data is too big to be all be in memory
+
+Issues so far:
+
+* Writing to boltdb involves 2 writes to disk, so perforamnce is terrible if writes aren't batched
+
+Ideas to try out:
+
+* Built test suite with a regular map
+* Swap in boltdb backend and compare.
+* Try out boltdb transaction coalescer
+  https://github.com/boltdb/coalescer
+
+*/
+
 package main
 
 import (
