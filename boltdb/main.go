@@ -12,10 +12,11 @@ Issues so far:
 
 Ideas to try out:
 
-* Built test suite with a regular map [DONE]
-* Swap in boltdb backend and compare. [DONE]
-* Try out boltdb transaction coalescer
+* Built test suite with a regular map  [DONE]
+* Swap in boltdb backend and compare.  [DONE]
+* Try out boltdb transaction coalescer [DONE]
   https://github.com/boltdb/coalescer
+* Rerun on SSD
 * Separate test to measure how long it takes to read all the values back.
 
 
@@ -24,7 +25,10 @@ Findings:
 * Overhead of db.Update for single key/value write is massive.
   At 1 million keys per db.Update overhead  still 5x slower
 
-Next try coalescer
+coalescer -- Not working well, but works. Go back to home built solution.
+ (Found issue with coalescer logic)
+
+
 
 */
 
@@ -33,7 +37,10 @@ package main
 import (
 	"fmt"
 	"github.com/boltdb/bolt"
+	//"github.com/boltdb/coalescer"  https://github.com/boltdb/coalescer/pull/1/commits
+	"github.com/jogo/coalescer"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +49,7 @@ import (
 // Interface used for testing
 type db interface {
 	Writer(key, value string)
+	Wait()
 }
 
 type mapType struct {
@@ -50,6 +58,9 @@ type mapType struct {
 
 func (m *mapType) Writer(key, value string) {
 	m.db[key] = value
+}
+
+func (m *mapType) Wait() {
 }
 
 func NewMapType() *mapType {
@@ -61,35 +72,48 @@ func NewMapType() *mapType {
 
 type boltType struct {
 	Db *bolt.DB
+	C  *coalescer.Coalescer
 }
 
-func NewBoltType() *boltType {
-	db := prepBolt()
+func NewBoltType(limit int) *boltType {
+	db, c := prepBolt(limit)
 	b := boltType{
 		Db: db,
+		C:  c,
 	}
 	return &b
 }
 
 func (mybolt *boltType) Writer(key, value string) {
-	err := mybolt.Db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucket)
-		err := b.Put([]byte(key), []byte(value))
+	go func() {
+		err := mybolt.C.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket(bucket)
+			return b.Put([]byte(key), []byte(value))
+		})
 		if err != nil {
-			return err
+			log.Fatal(err)
 		}
-		return nil
+	}()
+
+}
+
+func (mybolt *boltType) Wait() {
+	//Wait until everything is processed
+	err := mybolt.C.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		return b.Put([]byte("ready"), []byte("ready"))
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-
 }
 
 var bucket = []byte("MyBucket")
 
-func prepBolt() *bolt.DB {
-	db, err := bolt.Open("my.db", 0600, nil)
+func prepBolt(limit int) (*bolt.DB, *coalescer.Coalescer) {
+	path := "my.db"
+	os.Remove(path)
+	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -105,14 +129,19 @@ func prepBolt() *bolt.DB {
 	if err != nil {
 		log.Fatal(err)
 	}
-	return db
+
+	c, err := coalescer.New(db, limit, 200*time.Millisecond)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return db, c
 }
 
 func hellobolt() {
-	db := prepBolt()
+	db, c := prepBolt(1)
 	defer db.Close()
 
-	err := db.Update(func(tx *bolt.Tx) error {
+	err := c.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		err := b.Put([]byte("answer"), []byte("42"))
 		return err
@@ -146,21 +175,25 @@ func writeTest(myDb db, size int) (duration time.Duration) {
 		key, value = keyValue(i)
 		myDb.Writer(key, value)
 	}
+	myDb.Wait()
 	return time.Since(start)
 }
 
 func main() {
 	hellobolt()
-	size := 10
+
+	size := 500000
+	fmt.Printf("number of entries: %d\n", size)
 
 	mapDb := NewMapType()
 	mapTime := writeTest(mapDb, size)
 	fmt.Printf("Map Test took: %s\n", mapTime)
 
-	mapBolt := NewBoltType()
+	mapBolt := NewBoltType(size / 5)
 	defer mapBolt.Db.Close()
 
 	boltTime := writeTest(mapBolt, size)
+	mapBolt.Wait()
 	fmt.Printf("Bolt Test took: %s\n", boltTime)
 
 	fmt.Printf("bolt/map: %1.1fX\n",
