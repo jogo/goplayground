@@ -12,8 +12,8 @@ Issues so far:
 
 Ideas to try out:
 
-* Built test suite with a regular map
-* Swap in boltdb backend and compare.
+* Built test suite with a regular map [DONE]
+* Swap in boltdb backend and compare. [DONE]
 * Try out boltdb transaction coalescer
   https://github.com/boltdb/coalescer
 * Separate test to measure how long it takes to read all the values back.
@@ -38,6 +38,53 @@ import (
 	"strings"
 	"time"
 )
+
+// Interface used for testing
+type db interface {
+	Writer(key, value string)
+}
+
+type mapType struct {
+	db map[(string)]string
+}
+
+func (m *mapType) Writer(key, value string) {
+	m.db[key] = value
+}
+
+func NewMapType() *mapType {
+	m := mapType{
+		db: make(map[string]string),
+	}
+	return &m
+}
+
+type boltType struct {
+	Db *bolt.DB
+}
+
+func NewBoltType() *boltType {
+	db := prepBolt()
+	b := boltType{
+		Db: db,
+	}
+	return &b
+}
+
+func (mybolt *boltType) Writer(key, value string) {
+	err := mybolt.Db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		err := b.Put([]byte(key), []byte(value))
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+}
 
 var bucket = []byte("MyBucket")
 
@@ -91,52 +138,32 @@ func keyValue(i int) (key, value string) {
 	return key, value
 }
 
-func writeMapTest(size int) {
-	db := make(map[(string)]string)
+func writeTest(myDb db, size int) (duration time.Duration) {
+	start := time.Now()
 	var key string
 	var value string
 	for i := 0; i < size; i++ {
 		key, value = keyValue(i)
-		//fmt.Printf("%s: %s\n", key, value)
-		db[key] = value
+		myDb.Writer(key, value)
 	}
-
-}
-
-func writeBoltTest(size int) {
-	db := prepBolt()
-	defer db.Close()
-
-	var key string
-	var value string
-	err := db.Update(func(tx *bolt.Tx) error {
-		for i := 0; i < size; i++ {
-			key, value = keyValue(i)
-			b := tx.Bucket(bucket)
-			err := b.Put([]byte(key), []byte(value))
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	return time.Since(start)
 }
 
 func main() {
 	hellobolt()
-	size := 1000000
-	start := time.Now()
-	writeMapTest(size)
-	mapTime := time.Since(start)
+	size := 10
+
+	mapDb := NewMapType()
+	mapTime := writeTest(mapDb, size)
 	fmt.Printf("Map Test took: %s\n", mapTime)
-	start = time.Now()
-	writeBoltTest(size)
-	boltTime := time.Since(start)
+
+	mapBolt := NewBoltType()
+	defer mapBolt.Db.Close()
+
+	boltTime := writeTest(mapBolt, size)
 	fmt.Printf("Bolt Test took: %s\n", boltTime)
+
 	fmt.Printf("bolt/map: %1.1fX\n",
 		float64(boltTime.Nanoseconds())/float64(mapTime.Nanoseconds()))
+
 }
