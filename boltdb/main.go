@@ -16,7 +16,7 @@ Ideas to try out:
 * Swap in boltdb backend and compare.  [DONE]
 * Try out boltdb transaction coalescer [DONE]
   https://github.com/boltdb/coalescer
-* Rerun on SSD
+* Rerun on SSD                         [DONE]
 * Separate test to measure how long it takes to read all the values back.
 
 
@@ -25,7 +25,7 @@ Findings:
 * Overhead of db.Update for single key/value write is massive.
   At 1 million keys per db.Update overhead  still 5x slower
 
-coalescer -- Not working well, but works. Go back to home built solution.
+coalescer -- Not working well even on an SSD, but works. Go back to home built solution.
  (Found issue with coalescer logic)
 
 
@@ -37,8 +37,6 @@ package main
 import (
 	"fmt"
 	"github.com/boltdb/bolt"
-	//"github.com/boltdb/coalescer"  https://github.com/boltdb/coalescer/pull/1/commits
-	"github.com/jogo/coalescer"
 	"log"
 	"os"
 	"strconv"
@@ -49,18 +47,18 @@ import (
 // Interface used for testing
 type db interface {
 	Writer(key, value string)
-	Wait()
+	Flush()
 }
 
 type mapType struct {
-	db map[(string)]string
+	db map[string]string
 }
 
 func (m *mapType) Writer(key, value string) {
 	m.db[key] = value
 }
 
-func (m *mapType) Wait() {
+func (m *mapType) Flush() {
 }
 
 func NewMapType() *mapType {
@@ -71,47 +69,53 @@ func NewMapType() *mapType {
 }
 
 type boltType struct {
-	Db *bolt.DB
-	C  *coalescer.Coalescer
+	Db        *bolt.DB
+	buffer    map[string]string
+	batchSize int
 }
 
 func NewBoltType(limit int) *boltType {
-	db, c := prepBolt(limit)
+	db := prepBolt(limit)
 	b := boltType{
-		Db: db,
-		C:  c,
+		Db:     db,
+		buffer: make(map[string]string),
+		// If batch is too things slow down
+		batchSize: 10000,
 	}
 	return &b
 }
 
 func (mybolt *boltType) Writer(key, value string) {
-	go func() {
-		err := mybolt.C.Update(func(tx *bolt.Tx) error {
-			b := tx.Bucket(bucket)
-			return b.Put([]byte(key), []byte(value))
-		})
-		if err != nil {
-			log.Fatal(err)
-		}
-	}()
-
+	mybolt.buffer[key] = value
+	if len(mybolt.buffer) > mybolt.batchSize {
+		mybolt.Flush()
+	}
 }
 
-func (mybolt *boltType) Wait() {
-	//Wait until everything is processed
-	err := mybolt.C.Update(func(tx *bolt.Tx) error {
+func (mybolt *boltType) Flush() {
+	err := mybolt.Db.Update(func(tx *bolt.Tx) error {
+		//var err error
 		b := tx.Bucket(bucket)
-		return b.Put([]byte("ready"), []byte("ready"))
+		for key, value := range mybolt.buffer {
+			err := b.Put([]byte(key), []byte(value))
+			delete(mybolt.buffer, key)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
+	mybolt.Db.NoSync = true
 }
 
 var bucket = []byte("MyBucket")
 
-func prepBolt(limit int) (*bolt.DB, *coalescer.Coalescer) {
+func prepBolt(limit int) *bolt.DB {
 	path := "my.db"
+	// make sure we start from a fresh file every time
 	os.Remove(path)
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
@@ -130,18 +134,14 @@ func prepBolt(limit int) (*bolt.DB, *coalescer.Coalescer) {
 		log.Fatal(err)
 	}
 
-	c, err := coalescer.New(db, limit, 200*time.Millisecond)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return db, c
+	return db
 }
 
 func hellobolt() {
-	db, c := prepBolt(1)
+	db := prepBolt(1)
 	defer db.Close()
 
-	err := c.Update(func(tx *bolt.Tx) error {
+	err := db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		err := b.Put([]byte("answer"), []byte("42"))
 		return err
@@ -175,7 +175,7 @@ func writeTest(myDb db, size int) (duration time.Duration) {
 		key, value = keyValue(i)
 		myDb.Writer(key, value)
 	}
-	myDb.Wait()
+	myDb.Flush()
 	return time.Since(start)
 }
 
@@ -193,8 +193,18 @@ func main() {
 	defer mapBolt.Db.Close()
 
 	boltTime := writeTest(mapBolt, size)
-	mapBolt.Wait()
 	fmt.Printf("Bolt Test took: %s\n", boltTime)
+
+	// sanity check
+	mapBolt.Db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucket)
+		key, value := keyValue(size - 1)
+		storedValue := b.Get([]byte(key))
+		if value != string(storedValue) {
+			fmt.Printf("something went wrong, with the stored value: %s\n", storedValue)
+		}
+		return nil
+	})
 
 	fmt.Printf("bolt/map: %1.1fX\n",
 		float64(boltTime.Nanoseconds())/float64(mapTime.Nanoseconds()))
