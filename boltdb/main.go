@@ -17,7 +17,7 @@ Ideas to try out:
 * Try out boltdb transaction coalescer [DONE]
   https://github.com/boltdb/coalescer
 * Rerun on SSD                         [DONE]
-* Separate test to measure how long it takes to read all the values back.
+* Separate test to measure how long it takes to read all the values back. [DONE]
 
 
 Findings:
@@ -28,6 +28,15 @@ Findings:
 coalescer -- Not working well even on an SSD, but works. Go back to home built solution.
  (Found issue with coalescer logic)
 
+* Reading back, as expected is faster then writing.
+
+number of entries: 5 Million
+Write map test took: 5.528 s
+Write bolt test took: 38.55 s
+Write bolt/map: 7.0X
+Read bolt test took: 15.99 s
+
+bolt db file size: ~1GB
 
 
 */
@@ -182,31 +191,35 @@ func writeTest(myDb db, size int) (duration time.Duration) {
 func main() {
 	hellobolt()
 
-	size := 500000
+	size := 5000000
 	fmt.Printf("number of entries: %d\n", size)
 
 	mapDb := NewMapType()
 	mapTime := writeTest(mapDb, size)
-	fmt.Printf("Map Test took: %s\n", mapTime)
+	fmt.Printf("Write map test took: %s\n", mapTime)
 
 	mapBolt := NewBoltType(size / 5)
 	defer mapBolt.Db.Close()
-
 	boltTime := writeTest(mapBolt, size)
-	fmt.Printf("Bolt Test took: %s\n", boltTime)
+	fmt.Printf("Write bolt test took: %s\n", boltTime)
 
-	// sanity check
+	fmt.Printf("Write bolt/map: %1.1fX\n",
+		float64(boltTime.Nanoseconds())/float64(mapTime.Nanoseconds()))
+
+	// sanity check, read everything
+	start := time.Now()
 	mapBolt.Db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
-		key, value := keyValue(size - 1)
-		storedValue := b.Get([]byte(key))
-		if value != string(storedValue) {
-			fmt.Printf("something went wrong, with the stored value: %s\n", storedValue)
+		for i := 0; i < size; i++ {
+			key, value := keyValue(i)
+			storedValue := b.Get([]byte(key))
+			if value != string(storedValue) {
+				fmt.Printf("something went wrong, with the stored value: %s\n", storedValue)
+				return nil
+			}
 		}
 		return nil
 	})
-
-	fmt.Printf("bolt/map: %1.1fX\n",
-		float64(boltTime.Nanoseconds())/float64(mapTime.Nanoseconds()))
+	fmt.Printf("Read bolt test took: %s\n", time.Since(start))
 
 }
