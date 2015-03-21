@@ -71,7 +71,7 @@ func (m *mapType) Writer(key string, value []string) {
 func (m *mapType) Flush() {
 }
 
-func NewMapType() *mapType {
+func newMapType() *mapType {
 	m := mapType{
 		db: make(map[string][]string),
 	}
@@ -84,7 +84,7 @@ type boltType struct {
 	batchSize int
 }
 
-func NewBoltType(limit int) *boltType {
+func newBoltType(limit int) *boltType {
 	db := prepBolt(limit)
 	b := boltType{
 		Db:     db,
@@ -202,11 +202,11 @@ func main() {
 	size := 1000000
 	fmt.Printf("number of entries: %d\n", size)
 
-	mapDb := NewMapType()
+	mapDb := newMapType()
 	mapTime := writeTest(mapDb, size)
 	fmt.Printf("Write map test took: %s\n", mapTime)
 
-	mapBolt := NewBoltType(size / 5)
+	mapBolt := newBoltType(size / 5)
 	defer mapBolt.Db.Close()
 	boltTime := writeTest(mapBolt, size)
 	fmt.Printf("Write bolt test took: %s\n", boltTime)
