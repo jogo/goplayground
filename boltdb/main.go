@@ -44,6 +44,7 @@ bolt db file size: ~1GB
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/boltdb/bolt"
 	"log"
@@ -55,15 +56,15 @@ import (
 
 // Interface used for testing
 type db interface {
-	Writer(key, value string)
+	Writer(key string, value []string)
 	Flush()
 }
 
 type mapType struct {
-	db map[string]string
+	db map[string][]string
 }
 
-func (m *mapType) Writer(key, value string) {
+func (m *mapType) Writer(key string, value []string) {
 	m.db[key] = value
 }
 
@@ -72,14 +73,14 @@ func (m *mapType) Flush() {
 
 func NewMapType() *mapType {
 	m := mapType{
-		db: make(map[string]string),
+		db: make(map[string][]string),
 	}
 	return &m
 }
 
 type boltType struct {
 	Db        *bolt.DB
-	buffer    map[string]string
+	buffer    map[string][]string
 	batchSize int
 }
 
@@ -87,14 +88,14 @@ func NewBoltType(limit int) *boltType {
 	db := prepBolt(limit)
 	b := boltType{
 		Db:     db,
-		buffer: make(map[string]string),
+		buffer: make(map[string][]string),
 		// If batch is too things slow down
 		batchSize: 10000,
 	}
 	return &b
 }
 
-func (mybolt *boltType) Writer(key, value string) {
+func (mybolt *boltType) Writer(key string, value []string) {
 	mybolt.buffer[key] = value
 	if len(mybolt.buffer) > mybolt.batchSize {
 		mybolt.Flush()
@@ -106,7 +107,11 @@ func (mybolt *boltType) Flush() {
 		//var err error
 		b := tx.Bucket(bucket)
 		for key, value := range mybolt.buffer {
-			err := b.Put([]byte(key), []byte(value))
+			bytes, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			err = b.Put([]byte(key), bytes)
 			delete(mybolt.buffer, key)
 			if err != nil {
 				return err
@@ -170,16 +175,19 @@ func hellobolt() {
 	}
 }
 
-func keyValue(i int) (key, value string) {
+func keyValue(i int) (key string, value []string) {
 	key = strconv.Itoa(i)
-	value = strings.Repeat(key, 5)
+	value = make([]string, 5)
+	for i := range value {
+		value[i] = strings.Repeat(key, i)
+	}
 	return key, value
 }
 
 func writeTest(myDb db, size int) (duration time.Duration) {
 	start := time.Now()
 	var key string
-	var value string
+	var value []string
 	for i := 0; i < size; i++ {
 		key, value = keyValue(i)
 		myDb.Writer(key, value)
@@ -191,7 +199,7 @@ func writeTest(myDb db, size int) (duration time.Duration) {
 func main() {
 	hellobolt()
 
-	size := 5000000
+	size := 1000000
 	fmt.Printf("number of entries: %d\n", size)
 
 	mapDb := NewMapType()
@@ -210,12 +218,15 @@ func main() {
 	start := time.Now()
 	mapBolt.Db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
+		var storedValue []string
 		for i := 0; i < size; i++ {
-			key, value := keyValue(i)
-			storedValue := b.Get([]byte(key))
-			if value != string(storedValue) {
-				fmt.Printf("something went wrong, with the stored value: %s\n", storedValue)
-				return nil
+			key := strconv.Itoa(i)
+			err := json.Unmarshal(b.Get([]byte(key)), &storedValue)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if i == 1 {
+				fmt.Println("stored value:", storedValue)
 			}
 		}
 		return nil
